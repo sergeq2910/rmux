@@ -150,20 +150,24 @@ func (s *Session) OpenStream() (*Stream, error) {
 	sid := s.nextStreamID
 	s.nextStreamIDLock.Unlock()
 	stream := newStream(sid, s.config.MaxFrameSize, s)
+	s.streamLock.Lock()
+	s.streams[sid] = stream
+	s.streamLock.Unlock()
 	if _, err := s.writeControlFrame(newFrame(byte(s.config.Version), cmdSYN, sid)); err != nil {
+		s.streamClosed(sid)
 		return nil, err
 	}
 	select {
 	case <-s.chSocketReadError:
+		s.streamClosed(sid)
 		return nil, s.socketReadError.Load().(error)
 	case <-s.chSocketWriteError:
+		s.streamClosed(sid)
 		return nil, s.socketWriteError.Load().(error)
 	case <-s.die:
+		s.streamClosed(sid)
 		return nil, io.ErrClosedPipe
 	default:
-		s.streamLock.Lock()
-		s.streams[sid] = stream
-		s.streamLock.Unlock()
 		return stream, nil
 	}
 }
@@ -208,8 +212,10 @@ func (s *Session) Close() error {
 		return io.ErrClosedPipe
 	}
 	s.streamLock.Lock()
-	for k := range s.streams {
-		s.streams[k].sessionClose()
+	for k, stream := range s.streams {
+		stream.sessionClose()
+		stream.recycleTokens()
+		delete(s.streams, k)
 	}
 	s.streamLock.Unlock()
 	return s.conn.Close()
